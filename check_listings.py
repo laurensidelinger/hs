@@ -34,10 +34,20 @@ def save_seen_ids(ids):
     SEEN_FILE.write_text(json.dumps(sorted(ids), indent=2))
 
 
-def fetch_listings():
-    resp = requests.get(API_URL, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+def fetch_listings(max_retries=3):
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(API_URL, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = 5 * attempt  # 5s, 10s backoff
+                print(f"Fetch attempt {attempt} failed ({e}); retrying in {wait}s...")
+                time.sleep(wait)
+    raise last_error
 
 
 def format_price(units):
@@ -117,10 +127,11 @@ def post_to_discord(new_listings):
     for i in range(0, len(new_listings), batch_size):
         batch = new_listings[i : i + batch_size]
         payload = {
-            "content": f"🏠 {len(batch)} new Metrolist listing(s)!"
+            "content": f"@everyone 🏠 {len(batch)} new Metrolist listing(s)!"
             if i == 0
             else None,
             "embeds": [build_discord_embed(listing) for listing in batch],
+            "allowed_mentions": {"parse": ["everyone"]},
         }
         resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
         resp.raise_for_status()
@@ -129,7 +140,14 @@ def post_to_discord(new_listings):
 
 def main():
     seen_ids = load_seen_ids()
-    listings = fetch_listings()
+    try:
+        listings = fetch_listings()
+    except requests.exceptions.RequestException as e:
+        # Transient outage on Boston.gov's end (e.g. a 503). Skip this
+        # pass rather than crashing -- the loop that calls this script
+        # will just try again on the next iteration.
+        print(f"Skipping this check: {e}")
+        return
 
     current_ids = {listing["id"] for listing in listings}
     new_ids = current_ids - seen_ids

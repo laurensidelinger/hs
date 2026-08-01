@@ -49,12 +49,27 @@ def save_seen_ids(ids):
     SEEN_FILE.write_text(json.dumps(sorted(ids), indent=2))
 
 
+def fetch_page_html(max_retries=3):
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(
+                URL, timeout=30, headers={"User-Agent": "Mozilla/5.0 (listing-alert-bot)"}
+            )
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = 5 * attempt  # 5s, 10s backoff
+                print(f"Fetch attempt {attempt} failed ({e}); retrying in {wait}s...")
+                time.sleep(wait)
+    raise last_error
+
+
 def fetch_rows():
-    resp = requests.get(
-        URL, timeout=30, headers={"User-Agent": "Mozilla/5.0 (listing-alert-bot)"}
-    )
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = fetch_page_html()
+    soup = BeautifulSoup(html, "html.parser")
 
     table = soup.find("table")
     if table is None:
@@ -138,8 +153,9 @@ def post_to_discord(new_rows):
     for i in range(0, len(new_rows), batch_size):
         batch = new_rows[i : i + batch_size]
         payload = {
-            "content": f"🏠 {len(batch)} new Maloney listing(s)!" if i == 0 else None,
+            "content": f"@everyone 🏠 {len(batch)} new Maloney listing(s)!" if i == 0 else None,
             "embeds": [build_discord_embed(row) for row in batch],
+            "allowed_mentions": {"parse": ["everyone"]},
         }
         resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
         resp.raise_for_status()
@@ -148,7 +164,14 @@ def post_to_discord(new_rows):
 
 def main():
     seen_ids = load_seen_ids()
-    rows = fetch_rows()
+    try:
+        rows = fetch_rows()
+    except requests.exceptions.RequestException as e:
+        # Transient outage on Maloney's end. Skip this pass rather than
+        # crashing -- the loop that calls this script will just try
+        # again on the next iteration.
+        print(f"Skipping this check: {e}")
+        return
 
     current_ids = {row_id(r) for r in rows}
     id_to_row = {row_id(r): r for r in rows}

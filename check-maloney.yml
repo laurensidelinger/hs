@@ -1,0 +1,78 @@
+name: Check Maloney Listings
+
+on:
+  schedule:
+    # Triggers every 5 minutes, offset by ~2-3 minutes from the Metrolist
+    # check so both workflows don't try to commit/push to the repo at
+    # the same instant. The real check frequency comes from the loop
+    # inside the job below, not from this cron interval.
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: check-maloney
+  cancel-in-progress: true # if a run overruns into the next trigger, cancel the older one instead of running two loops in parallel
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run listing check loop
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # Loop the check every ~25s for ~4.5 minutes so real detection
+          # cadence is much tighter than the 5-minute trigger interval.
+          # seen_maloney_listings.json is updated on disk each pass
+          # (cheap, local) -- it is NOT committed to git until the loop
+          # ends, so this doesn't spam commits or risk mid-loop push
+          # conflicts.
+          CHECKS=0
+          ERRORS=0
+          END=$((SECONDS + 270))
+          while [ $SECONDS -lt $END ]; do
+            if python check_maloney.py; then
+              CHECKS=$((CHECKS+1))
+            else
+              CHECKS=$((CHECKS+1))
+              ERRORS=$((ERRORS+1))
+            fi
+            sleep 25
+          done
+
+          # One heartbeat message per run (not per check) so you know
+          # it's alive without spamming the channel every 25 seconds.
+          if [ "$ERRORS" -eq 0 ]; then
+            STATUS="✅ Maloney: $CHECKS checks OK"
+          else
+            STATUS="⚠️ Maloney: $CHECKS checks, $ERRORS failed"
+          fi
+          NOW=$(date -u +'%Y-%m-%d %H:%M UTC')
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": \"$STATUS at $NOW\"}" \
+            "$DISCORD_WEBHOOK_URL" > /dev/null || true
+
+      - name: Commit updated seen_maloney_listings.json
+        if: always()
+        run: |
+          git config user.name "maloney-bot"
+          git config user.email "actions@github.com"
+          git add seen_maloney_listings.json
+          git diff --staged --quiet || git commit -m "Update seen listings [skip ci]"
+          git pull --rebase
+          git push
