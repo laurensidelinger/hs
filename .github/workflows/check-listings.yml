@@ -41,13 +41,33 @@ jobs:
           # seen_listings.json is updated on disk each pass (cheap, local)
           # -- it is NOT committed to git until the loop ends, so this
           # doesn't spam commits or risk mid-loop push conflicts.
+          CHECKS=0
+          ERRORS=0
           END=$((SECONDS + 270))
           while [ $SECONDS -lt $END ]; do
-            python check_listings.py
+            if python check_listings.py; then
+              CHECKS=$((CHECKS+1))
+            else
+              CHECKS=$((CHECKS+1))
+              ERRORS=$((ERRORS+1))
+            fi
             sleep 25
           done
 
+          # One heartbeat message per run (not per check) so you know
+          # it's alive without spamming the channel every 25 seconds.
+          if [ "$ERRORS" -eq 0 ]; then
+            STATUS="✅ Metrolist: $CHECKS checks OK"
+          else
+            STATUS="⚠️ Metrolist: $CHECKS checks, $ERRORS failed"
+          fi
+          NOW=$(date -u +'%Y-%m-%d %H:%M UTC')
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": \"$STATUS at $NOW\"}" \
+            "$DISCORD_WEBHOOK_URL" > /dev/null || true
+
       - name: Commit updated seen_listings.json
+        if: always()
         run: |
           git config user.name "metrolist-bot"
           git config user.email "actions@github.com"
